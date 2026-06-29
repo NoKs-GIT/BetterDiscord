@@ -1,8 +1,8 @@
 /**
  * @name SpotifyEnhanced
- * @author noks.pm
+ * @author you
  * @description Displays Spotify lyrics as your Discord custom status in real time.
- * @version 4.0.0
+ * @version 4.2.0
  */
 
 module.exports = class SpotifyEnhanced {
@@ -11,7 +11,7 @@ module.exports = class SpotifyEnhanced {
 
     // ─── Identity ─────────────────────────────────────────────────────────────
     static PLUGIN_NAME    = "SpotifyEnhanced";
-    static PLUGIN_VERSION = "4.0.0";
+    static PLUGIN_VERSION = "4.2.0";
     static PLUGIN_DESC    = "All-in-one Spotify enhancement suite for Discord";
 
     // Sub-plugins — single source of truth for name/version/desc
@@ -19,7 +19,7 @@ module.exports = class SpotifyEnhanced {
         spotifylyrics: {
             key:     "spotifylyrics",
             name:    "SpotifyLyrics",
-            version: "1.0.0",
+            version: "3.9.0",
             desc:    "Displays real-time Spotify lyrics as your Discord custom status",
             navLabel:"🎵 SpotifyLyrics",
         },
@@ -39,8 +39,11 @@ module.exports = class SpotifyEnhanced {
     static INSTRUMENTAL_RE = /^[♪♫*\-~\s]+$/;
     static LOG_MAX         = 200;
     static HISTORY_DEFAULT = 20;
-    static GLOBAL_LOGS     = [];  // cross-plugin log buffer (errors/warns/debug only)
-    static GLOBAL_LOG_MAX  = 100;
+    // Per-source log buffers
+    static LOGS = { "SpotifyEnhanced": [], "SpotifyLyrics": [], "SpotifyTitleDisplay": [] };
+    static LOG_LIMITS = { "SpotifyEnhanced": 100, "SpotifyLyrics": 200, "SpotifyTitleDisplay": 100 };
+    static get GLOBAL_LOGS()    { return SpotifyEnhanced.LOGS["SpotifyEnhanced"]; }
+    static get GLOBAL_LOG_MAX() { return SpotifyEnhanced.LOG_LIMITS["SpotifyEnhanced"]; }
     static PLUGIN_STATES   = {};   // { key: { mode, startedAt, stoppedAt } }
     // Plugin modes: "active" | "semi" | "disabled"
     static MODES = {
@@ -199,8 +202,6 @@ module.exports = class SpotifyEnhanced {
         // Discord modules
         this._SpotifyStore        = null;
         this._UserSettingsUpdater = null;
-        // Logs
-        this._logs                = [];
         this._logPanel            = null;
         this._logFilterEl         = null;
         // History
@@ -215,56 +216,33 @@ module.exports = class SpotifyEnhanced {
     }
 
     // ─── Logging ──────────────────────────────────────────────────────────────
+    // source hint: "HOST" = SpotifyEnhanced, "STD" = SpotifyTitleDisplay, default = SpotifyLyrics
 
-    _log(level, msg, extra) {
-        const def   = SpotifyEnhanced.LOG_LEVELS[level] ?? SpotifyEnhanced.LOG_LEVELS.info;
+    _log(level, msg, sourceHint) {
+        const def = SpotifyEnhanced.LOG_LEVELS[level] ?? SpotifyEnhanced.LOG_LEVELS.info;
+        let source;
+        if (sourceHint === "HOST")                                      source = "SpotifyEnhanced";
+        else if (sourceHint === "STD" || msg?.startsWith("[STD]"))      source = "SpotifyTitleDisplay";
+        else                                                            source = "SpotifyLyrics";
         const entry = {
-            ts:      Date.now(),
-            time:    new Date().toLocaleTimeString("en-US", { hour12: false }),
-            plugin:  (msg?.startsWith("[STD]") ? "SpotifyTitleDisplay" : "SpotifyLyrics"),
+            ts:    Date.now(),
+            time:  new Date().toLocaleTimeString("en-US", { hour12: false }),
+            source,
             level,
-            icon:    def.icon,
-            color:   def.color,
-            msg,
-            extra:   extra ?? null,
+            icon:  def.icon,
+            color: def.color,
+            msg:   (msg ?? "").replace(/^\[STD\]\s*/, ""),
         };
-        // Per-plugin log buffer
-        this._logs.push(entry);
-        if (this._logs.length > SpotifyEnhanced.LOG_MAX) this._logs.shift();
-        if (this._logPanel) this._renderLogs();
-        // Global log buffer — errors, warns, info, plugin events (no lyric/status/cache/network spam)
-        if (["error", "warn", "info", "plugin"].includes(level)) {
-            SpotifyEnhanced.GLOBAL_LOGS.push(entry);
-            if (SpotifyEnhanced.GLOBAL_LOGS.length > SpotifyEnhanced.GLOBAL_LOG_MAX)
-                SpotifyEnhanced.GLOBAL_LOGS.shift();
+        const buf = SpotifyEnhanced.LOGS[source];
+        if (buf) {
+            buf.push(entry);
+            const limit = SpotifyEnhanced.LOG_LIMITS[source] ?? 100;
+            if (buf.length > limit) buf.shift();
         }
         if (this._settings?.debugLogs) {
             const fn = level === "error" ? console.error : level === "warn" ? console.warn : console.debug;
-            fn(`[SpotifyEnhanced:SpotifyLyrics:${def.label}] ${msg}`, extra ?? "");
+            fn(`[${source}][${def.label}] ${entry.msg}`);
         }
-    }
-
-    _renderLogs() {
-        if (!this._logPanel) return;
-        const filter = this._settings?.logFilter ?? "all";
-        const entries = this._logs
-            .filter(e => filter === "all" || e.level === filter)
-            .slice(-80)
-            .reverse();
-
-        if (!entries.length) {
-            this._logPanel.innerHTML = `<div style="color:var(--text-muted);font-size:12px;font-style:italic;padding:8px">No logs${filter !== "all" ? ` for filter "${filter}"` : ""}</div>`;
-            return;
-        }
-
-        this._logPanel.innerHTML = entries.map(e => `
-            <div style="display:flex;gap:6px;align-items:baseline;padding:2px 0;border-bottom:1px solid rgba(255,255,255,.04)">
-                <span style="color:var(--text-muted);font-size:10px;flex-shrink:0;font-family:monospace">${e.time}</span>
-                <span style="font-size:10px;flex-shrink:0">${e.icon}</span>
-                <span style="font-size:10px;font-weight:700;color:${e.color};flex-shrink:0;min-width:46px">${SpotifyEnhanced.LOG_LEVELS[e.level]?.label ?? e.level}</span>
-                <span style="font-size:11px;color:var(--text-normal);word-break:break-all">${e.msg.replace(/</g, "&lt;")}</span>
-            </div>
-        `).join("");
     }
 
     // ─── Lifecycle ────────────────────────────────────────────────────────────
@@ -287,19 +265,19 @@ module.exports = class SpotifyEnhanced {
         if (initial !== null) this._savedStatus = initial;
 
         this._log("info", `SpotifyEnhanced v${SpotifyEnhanced.PLUGIN_VERSION} started`);
-        this._log("plugin", "SpotifyLyrics: INACTIVE — enable manually in Main > Plugins");
-        this._log("plugin", "SpotifyTitleDisplay: INACTIVE — enable manually in Main > Plugins");
+        this._log("plugin", "SpotifyLyrics: INACTIVE — enable in Main > Plugins", "HOST");
+        this._log("plugin", "SpotifyTitleDisplay: INACTIVE — enable in Main > Plugins", "HOST");
     }
 
     stop() {
-        this._log("plugin", "SpotifyLyrics stopping...");
-        this._log("plugin", "SpotifyTitleDisplay stopping...");
+        this._log("plugin", "Stopping SpotifyLyrics...", "HOST");
+        this._log("plugin", "Stopping SpotifyTitleDisplay...", "HOST");
         this._stopPoll();
         this._stopSTD();
         if (this._trackHeaderTimer) clearTimeout(this._trackHeaderTimer);
         if (this._statusRefreshTimer) clearInterval(this._statusRefreshTimer);
         this._restoreStatus();
-        this._log("info", `SpotifyEnhanced v${SpotifyEnhanced.PLUGIN_VERSION} stopped`);
+        this._log("info", `SpotifyEnhanced v${SpotifyEnhanced.PLUGIN_VERSION} stopped`, "HOST");
         this._resetState();
     }
 
@@ -312,7 +290,7 @@ module.exports = class SpotifyEnhanced {
             this._stdSemiActive = false;
             // Patcher already installed, just flip flag
             SpotifyEnhanced.PLUGIN_STATES["spotifytitledisplay"].mode = "active";
-            this._log("plugin", "[STD] SpotifyTitleDisplay upgraded semi → ACTIVE");
+            this._log("plugin", "Semi → ACTIVE (flag flip)", "STD");
             return;
         }
         if (!this._stdEnabled) return;
@@ -334,14 +312,14 @@ module.exports = class SpotifyEnhanced {
             // Store unpatch fn
             const origFn = ActivityTextModule[key];
             const self   = this;
-            self._log("debug", `[STD] Patching key: "${key}" on ActivityTextModule`);
+            self._log("debug", `Patching key: "${key}" on ActivityTextModule`, "STD");
             ActivityTextModule[key] = function(...args) {
                 const result   = origFn.apply(this, args);
                 const activity = args[0];
                 if (!activity || activity.type !== 2 || activity.name !== "Spotify") return result;
                 if (!self._stdEnabled) return result;
                 const title = activity.details;
-                if (!title) { self._log("debug", "[STD] No title in activity — skipping"); return result; }
+                if (!title) { self._log("debug", "No title in activity — skipping", "STD"); return result; }
                 const ss      = self._stdSettings ?? {};
                 // Discord separates multiple artists with "; " in activity.state
                 const allArts = (activity.state ?? "").split(/;\s*|,\s*/).map(a => a.trim()).filter(Boolean);
@@ -356,11 +334,11 @@ module.exports = class SpotifyEnhanced {
                 if (ss.showAlbum && activity.details) { /* album not in activity.state */ }
                 display = (ss.prefix ?? "") + display + (ss.suffix ?? "");
                 if (!display) return result;
-                self._log("debug", `[STD] Display: "${display}" (artists: ${artists.join(", ")})`);
+                self._log("debug", `RPC display: "${display}"`, "STD");
                 return { ...result, text: display, tooltip: display };
             };
             this._stdPatcher = () => { ActivityTextModule[key] = origFn; };
-            self._log("plugin", "[STD] SpotifyTitleDisplay started — patched ActivityTextModule");
+            self._log("plugin", "→ ACTIVE — ActivityTextModule patched", "STD");
         } catch(e) {
             this._log("error", `[STD] Failed to start: ${e.message}`);
         }
@@ -393,11 +371,11 @@ module.exports = class SpotifyEnhanced {
                     this._log("[STD] SpotifyTitleDisplay → SEMI-ACTIVE (patch installed, passthrough mode)");
                 }
             }
-        } catch(e) { this._log("warn", `[STD] Semi-active patch failed: ${e.message}`); }
+        } catch(e) { this._log("warn", `Semi-active patch failed: ${e.message}`, "STD"); }
         SpotifyEnhanced.PLUGIN_STATES["spotifytitledisplay"].mode      = "semi";
         SpotifyEnhanced.PLUGIN_STATES["spotifytitledisplay"].startedAt = Date.now();
         SpotifyEnhanced.PLUGIN_STATES["spotifytitledisplay"].stoppedAt = null;
-        this._log("plugin", "[STD] SpotifyTitleDisplay → SEMI-ACTIVE");
+        this._log("plugin", "→ SEMI-ACTIVE (passthrough)", "STD");
     }
 
     _stopSTD() {
@@ -405,7 +383,7 @@ module.exports = class SpotifyEnhanced {
         if (this._stdPatcher) {
             this._stdPatcher();
             this._stdPatcher = null;
-            this._log("plugin", "[STD] SpotifyTitleDisplay → DISABLED");
+            this._log("plugin", "→ DISABLED", "STD");
         }
     }
 
@@ -706,7 +684,7 @@ Thank you.
     _resolveDiscordModules() {
         this._SpotifyStore = BdApi.Webpack.getStore("SpotifyStore");
         if (!this._SpotifyStore)
-            this._log("error", "SpotifyStore not found — Spotify must be connected to Discord");
+            this._log("error", "SpotifyStore not found — connect Spotify to Discord", "HOST");
 
         const candidates = BdApi.Webpack.getModules(
             m => typeof m?.updateAsync === "function",
@@ -717,9 +695,9 @@ Thank you.
         ) ?? null;
 
         if (!this._UserSettingsUpdater)
-            this._log("error", "UserSettingsUpdater not found — status update unavailable");
+            this._log("error", "UserSettingsUpdater not found", "HOST");
         else
-            this._log("info", "Discord modules resolved successfully");
+            this._log("info", "Discord modules resolved", "HOST");
     }
 
     // ─── Status ───────────────────────────────────────────────────────────────
@@ -1177,68 +1155,46 @@ Thank you.
     getSettingsPanel() {
         const s    = this._settings;
         const root = document.createElement("div");
-        root.style.cssText = "font-size:14px;color:var(--text-normal)";
-
-        // ── Plugin nav (Discord-style tab bar, not a <select>) ──────────────────
-        const navBar = document.createElement("div");
-        navBar.style.cssText = [
-            "display:flex",
-            "align-items:stretch",
-            "padding:0 16px",
-            "background:var(--background-secondary-alt)",
-            "border-bottom:2px solid var(--background-modifier-accent)",
-            "gap:2px",
-        ].join(";");
+        root.style.cssText = "font-size:14px;color:var(--text-normal);display:flex;flex-direction:column;height:100%";
 
         const pluginContainer = document.createElement("div");
-        root.appendChild(navBar);
+        pluginContainer.style.cssText = "flex:1;overflow-y:auto";
         root.appendChild(pluginContainer);
 
-        // Plugin registry — pulled from static SUB_PLUGINS (single source of truth)
         const pluginList = Object.values(SpotifyEnhanced.SUB_PLUGINS);
-
         let activePage = "main";
 
-        const renderPluginPage = (key) => {
-            activePage = key;
-            pluginContainer.innerHTML = "";
-            // Update nav highlight
-            navBar.querySelectorAll("[data-nav]").forEach(el => {
-                const active = el.dataset.nav === key;
-                el.style.color        = active ? "var(--text-normal)"  : "var(--text-muted)";
-                el.style.borderBottom = active ? "2px solid var(--brand-experiment)" : "2px solid transparent";
-                el.style.fontWeight   = active ? "700" : "500";
-                el.style.marginBottom = "-2px";
-            });
-            if (key === "main")                      renderPluginMain();
-            else if (key === "spotifylyrics")        renderPluginLyrics();
-            else if (key === "spotifytitledisplay") renderPluginSTD();
+        const isPluginAccessible = (key) => {
+            if (key === "main") return true;
+            return (SpotifyEnhanced.PLUGIN_STATES[key]?.mode ?? "disabled") !== "disabled";
         };
 
-        // Build nav tabs
-        [{ key: "main", label: "🏠 Main" }, { key: "spotifylyrics", label: SpotifyEnhanced.SUB_PLUGINS.spotifylyrics.navLabel }, { key: "spotifytitledisplay", label: SpotifyEnhanced.SUB_PLUGINS.spotifytitledisplay.navLabel }]
-        .forEach(({ key, label }) => {
-            const tab = document.createElement("button");
-            tab.dataset.nav    = key;
-            tab.textContent    = label;
-            tab.style.cssText  = [
-                "background:transparent",
-                "border:none",
-                "border-bottom:2px solid transparent",
-                "color:var(--text-muted)",
-                "cursor:pointer",
-                "font-size:13px",
-                "font-weight:500",
-                "padding:10px 14px",
-                "transition:color .15s",
-                "margin-bottom:-2px",
-                "white-space:nowrap",
-            ].join(";");
-            tab.onmouseenter = () => { if (activePage !== key) tab.style.color = "var(--text-normal)"; };
-            tab.onmouseleave = () => { if (activePage !== key) tab.style.color = "var(--text-muted)"; };
-            tab.onclick      = () => renderPluginPage(key);
-            navBar.appendChild(tab);
-        });
+        // refreshNavLock is a no-op now (no top nav) — kept for compat
+        const refreshNavLock = () => {};
+
+        const renderPluginPage = (key) => {
+            if (key !== "main" && !isPluginAccessible(key)) return;
+            activePage = key;
+            pluginContainer.innerHTML = "";
+            if (key === "main")                      renderPluginMain();
+            else if (key === "spotifylyrics")        renderPluginLyrics();
+            else if (key === "spotifytitledisplay")  renderPluginSTD();
+        };
+
+        // Helper: inject "← Back to Main" footer bar at bottom of any plugin page
+        const addGoMainBtn = (container) => {
+            const bar = document.createElement("div");
+            bar.style.cssText = "padding:10px 16px;border-top:1px solid #2e3035;background:#0f1012;flex-shrink:0;display:flex;align-items:center";
+            const btn = document.createElement("button");
+            btn.textContent   = "← Back to Main";
+            btn.style.cssText = "padding:6px 14px;border-radius:6px;border:none;background:#2b2d31;color:#b5bac1;cursor:pointer;font-size:12px;font-weight:600;transition:background .12s";
+            btn.onmouseenter = () => btn.style.background = "#3f4147";
+            btn.onmouseleave = () => btn.style.background = "#2b2d31";
+            btn.onclick = () => renderPluginPage("main");
+            bar.appendChild(btn);
+            container.appendChild(bar);
+        };
+
 
         // ── Main page ─────────────────────────────────────────────────────────
         const renderPluginMain = () => {
@@ -1331,6 +1287,8 @@ Thank you.
                     }
                     onDone?.();
                 };
+
+                const cardRefreshers = [];
 
                 pluginList.forEach(pl => {
                     // ── Card ──────────────────────────────────────────────────
@@ -1429,11 +1387,13 @@ Thank you.
                         });
                     };
                     refreshCard();
+                    cardRefreshers.push(refreshCard);
                 });
 
-                // Auto-refresh timing every 1s
+                // (cardRefreshers declared above before forEach)
                 const t = setInterval(() => {
                     if (!mainContent.isConnected) { clearInterval(t); return; }
+                    // Refresh timing badges
                     pluginList.forEach(pl => {
                         const el    = mainContent.querySelector(`[data-timing="${pl.key}"]`);
                         const state = SpotifyEnhanced.PLUGIN_STATES[pl.key];
@@ -1446,19 +1406,23 @@ Thank you.
                         else
                             el.textContent = "";
                     });
+                    // Refresh card visual states (mode buttons, badges, borders)
+                    cardRefreshers.forEach(fn => fn());
                 }, 1000);
             }; // end renderMainPlugins
 
             // ─── Logs ─────────────────────────────────────────────────────────
             const renderMainLogs = () => {
                 mainContent.innerHTML = "";
+                // Clear all log buffers
+                Object.keys(SpotifyEnhanced.LOGS).forEach(k => SpotifyEnhanced.LOGS[k].length = 0);
 
                 // Plugin filter tabs
                 const ALL_PLUGINS = [
-                    { key: "all",                 label: "All",                color: "#99aab5" },
+                    { key: "all",                 label: "✦ All",              color: "#99aab5" },
                     { key: "SpotifyEnhanced",     label: "SpotifyEnhanced",    color: "#5865f2" },
                     { key: "SpotifyLyrics",       label: "SpotifyLyrics",      color: "#1db954" },
-                    { key: "SpotifyTitleDisplay", label: "SpotifyTitleDisplay", color: "#eb459e" },
+                    { key: "SpotifyTitleDisplay", label: "TitleDisplay",         color: "#eb459e" },
                 ];
                 const LEVEL_FILTERS = ["all", "error", "warn", "info", "plugin", "debug"];
 
@@ -1536,38 +1500,12 @@ Thank you.
                 // Use the full _logs buffer (all levels) not just GLOBAL_LOGS
                 // We combine GLOBAL_LOGS + filter per plugin on the fly
                 const getAllLogs = () => {
-                    // GLOBAL_LOGS has error/warn/info/plugin; _logs has everything
-                    // For "all plugins all levels" use _logs (SpotifyLyrics context)
-                    // For STD-specific use GLOBAL_LOGS filtered by plugin
-                    const base = [...this._logs];
-                    // Merge STD-specific logs (already in _logs via _log re-routing)
-                    return base.sort((a, b) => a.ts - b.ts);
+                    return Object.values(SpotifyEnhanced.LOGS).flat().sort((a, b) => a.ts - b.ts);
                 };
 
                 const refreshLogs = () => {
-                    let entries = getAllLogs();
-                    if (pluginFilter !== "all")
-                        entries = entries.filter(e => e.plugin === pluginFilter);
-                    if (levelFilter !== "all")
-                        entries = entries.filter(e => e.level === levelFilter);
-                    entries = entries.slice(-120).reverse();
-
-                    if (!entries.length) {
-                        logPanel.innerHTML = `<div style="color:#72767d;font-size:12px;font-style:italic;padding:6px">No logs match the current filters.</div>`;
-                        return;
-                    }
-                    const atBottom = logPanel.scrollTop + logPanel.clientHeight >= logPanel.scrollHeight - 12;
-                    logPanel.innerHTML = entries.map(e => {
-                        const pCol = ALL_PLUGINS.find(p => p.key === e.plugin)?.color ?? "#99aab5";
-                        return `<div style="display:flex;gap:6px;align-items:baseline;padding:3px 0;border-bottom:1px solid rgba(255,255,255,.04)">
-                            <span style="color:#72767d;font-size:9px;flex-shrink:0;min-width:56px">${e.time}</span>
-                            <span style="font-size:10px;flex-shrink:0">${e.icon}</span>
-                            <span style="font-size:10px;font-weight:700;color:${e.color};flex-shrink:0;min-width:40px">${SpotifyEnhanced.LOG_LEVELS[e.level]?.label ?? e.level}</span>
-                            <span style="font-size:10px;color:${pCol};flex-shrink:0;min-width:90px">[${e.plugin}]</span>
-                            <span style="font-size:11px;color:#dbdee1;word-break:break-all;line-height:1.4">${e.msg.replace(/</g,"&lt;")}</span>
-                        </div>`;
-                    }).join("");
-                    if (atBottom) logPanel.scrollTop = logPanel.scrollHeight;
+                    // Logs temporarily cleared — system being rebuilt
+                    logPanel.innerHTML = `<div style="color:#72767d;font-size:12px;font-style:italic;padding:8px 6px">No logs.</div>`;
                 };
 
                 refreshLogs();
@@ -1586,13 +1524,13 @@ Thank you.
                 const clrBtn = document.createElement("button");
                 clrBtn.textContent   = "🗑 Clear all logs";
                 clrBtn.style.cssText = "padding:6px 14px;border-radius:6px;border:none;background:#ed424522;color:#ed4245;border:1px solid #ed424544;cursor:pointer;font-size:12px;font-weight:600";
-                clrBtn.onclick = () => { this._logs.length = 0; SpotifyEnhanced.GLOBAL_LOGS.length = 0; refreshLogs(); };
+                clrBtn.onclick = () => { Object.keys(SpotifyEnhanced.LOGS).forEach(k => SpotifyEnhanced.LOGS[k].length = 0); refreshLogs(); };
                 const cpyBtn = document.createElement("button");
                 cpyBtn.textContent   = "📋 Copy visible";
                 cpyBtn.style.cssText = "padding:6px 14px;border-radius:6px;border:none;background:#5865f222;color:#5865f2;border:1px solid #5865f244;cursor:pointer;font-size:12px;font-weight:600";
                 cpyBtn.onclick = () => {
                     let entries = getAllLogs();
-                    if (pluginFilter !== "all") entries = entries.filter(e => e.plugin === pluginFilter);
+                    if (pluginFilter !== "all") entries = entries.filter(e => e.source === pluginFilter);
                     if (levelFilter  !== "all") entries = entries.filter(e => e.level === levelFilter);
                     const txt = entries.map(e => `[${e.time}] [${e.plugin}] [${e.level.toUpperCase()}] ${e.msg}`).join("\n");
                     navigator.clipboard.writeText(txt).then(() => { cpyBtn.textContent = "✓ Copied!"; setTimeout(() => { cpyBtn.textContent = "📋 Copy visible"; }, 1600); });
@@ -1661,20 +1599,58 @@ Thank you.
                 const renderCacheGlobal = () => {
                 cacheContent.innerHTML = "";
                     const s1 = mkSec("SpotifyEnhanced");
-                    mkRow(s1, "Version",          `v${SpotifyEnhanced.PLUGIN_VERSION}`, "#5865f2");
-                    mkRow(s1, "Sub-plugins",       `${Object.keys(SpotifyEnhanced.SUB_PLUGINS).length}`, "#57f287");
-                    mkRow(s1, "Global log buffer", `${SpotifyEnhanced.GLOBAL_LOGS.length} / ${SpotifyEnhanced.GLOBAL_LOG_MAX}`, "#fee75c");
-                    mkRow(s1, "Per-plugin log buf", `${this._logs.length} / ${SpotifyEnhanced.LOG_MAX}`, "#fee75c");
+                    mkRow(s1, "Version",     `v${SpotifyEnhanced.PLUGIN_VERSION}`, "#5865f2");
+                    mkRow(s1, "Sub-plugins", `${Object.keys(SpotifyEnhanced.SUB_PLUGINS).length} registered`, "#57f287");
 
-                    const s2 = mkSec("User Consent");
+                    // Log buffer controls
+                    const s2 = mkSec("Log Buffers");
+                    const mkLogLimitRow = (source, color) => {
+                        const wrap = document.createElement("div");
+                        wrap.style.cssText = "display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid rgba(255,255,255,.04);font-size:12px;gap:8px";
+                        const lbl = document.createElement("span"); lbl.textContent = source; lbl.style.cssText = `color:#72767d;flex:1`;
+                        const right = document.createElement("div"); right.style.cssText = "display:flex;align-items:center;gap:6px";
+                        const cur = document.createElement("span");
+                        cur.style.cssText = `font-family:monospace;font-size:11px;color:${color}`;
+                        const updateCur = () => cur.textContent = `${SpotifyEnhanced.LOGS[source]?.length ?? 0} / ${SpotifyEnhanced.LOG_LIMITS[source] ?? 100}`;
+                        updateCur();
+                        const inp = document.createElement("input");
+                        inp.type = "number"; inp.value = SpotifyEnhanced.LOG_LIMITS[source] ?? 100; inp.min = 10; inp.max = 2000;
+                        inp.style.cssText = "background:#111214;color:#dbdee1;border:1px solid #3f4147;border-radius:4px;padding:2px 6px;width:60px;font-size:11px;font-family:monospace";
+                        const saveB = document.createElement("button");
+                        saveB.textContent = "Set"; saveB.style.cssText = "padding:2px 7px;border-radius:4px;border:none;background:#5865f222;color:#5865f2;cursor:pointer;font-size:11px;font-weight:600;border:1px solid #5865f244";
+                        saveB.onclick = () => { const v = parseInt(inp.value,10); if(!isNaN(v)&&v>=10){SpotifyEnhanced.LOG_LIMITS[source]=v; updateCur();} };
+                        const clrB = document.createElement("button");
+                        clrB.textContent = "🗑"; clrB.style.cssText = "padding:2px 6px;border-radius:4px;border:1px solid #ed424444;background:#ed424411;color:#ed4245;cursor:pointer;font-size:11px";
+                        clrB.onclick = () => { if(SpotifyEnhanced.LOGS[source]) SpotifyEnhanced.LOGS[source].length=0; updateCur(); };
+                        right.append(cur, inp, saveB, clrB); wrap.append(lbl, right); s2.appendChild(wrap);
+                    };
+                    mkLogLimitRow("SpotifyEnhanced",     "#5865f2");
+                    mkLogLimitRow("SpotifyLyrics",       "#1db954");
+                    mkLogLimitRow("SpotifyTitleDisplay", "#eb459e");
+
+                    // Consent per-plugin
+                    const s3 = mkSec("User Consent");
                     Object.values(SpotifyEnhanced.SUB_PLUGINS).forEach(pl => {
-                        const ok = this._consented[pl.key] ?? false;
-                        mkRow(s2, `${pl.name}`, ok ? "✓ Accepted" : "✗ Not given", ok ? "#57f287" : "#ed4245");
+                        const ok   = this._consented[pl.key] ?? false;
+                        const wrap = document.createElement("div");
+                        wrap.style.cssText = "display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid rgba(255,255,255,.04);font-size:12px;gap:8px";
+                        const left = document.createElement("div");
+                        left.innerHTML = `<span style="color:#72767d">${pl.name}</span> <span style="color:${ok?"#57f287":"#ed4245"};font-family:monospace;font-size:11px;margin-left:8px">${ok?"✓ Accepted":"✗ Not given"}</span>`;
+                        const rBtn = document.createElement("button");
+                        rBtn.textContent = ok ? "Revoke" : "—";
+                        rBtn.style.cssText = `padding:3px 8px;border-radius:4px;border:1px solid ${ok?"#ed424444":"transparent"};background:${ok?"#ed424411":"transparent"};color:${ok?"#ed4245":"#72767d"};cursor:${ok?"pointer":"default"};font-size:11px;font-weight:600`;
+                        if (ok) rBtn.onclick = () => {
+                            delete this._consented[pl.key];
+                            BdApi.Data.save(SpotifyEnhanced.PLUGIN_NAME, "consented", this._consented);
+                            this._log("plugin", `Consent revoked for ${pl.name}`, "HOST");
+                            renderCacheGlobal();
+                        };
+                        wrap.append(left, rBtn); s3.appendChild(wrap);
                     });
-                    s2.appendChild(mkBtn("🗑 Revoke all consents", "#ed4245", () => {
+                    s3.appendChild(mkBtn("🗑 Revoke all", "#ed4245", () => {
                         this._consented = {};
                         BdApi.Data.save(SpotifyEnhanced.PLUGIN_NAME, "consented", {});
-                        this._log("plugin", "All consents revoked");
+                        this._log("plugin", "All consents revoked", "HOST");
                         renderCacheGlobal();
                     }));
                 };
@@ -1683,23 +1659,65 @@ Thank you.
                 cacheContent.innerHTML = "";
                     const s1 = mkSec("SpotifyLyrics — Runtime");
                     const st = SpotifyEnhanced.PLUGIN_STATES["spotifylyrics"] ?? {};
-                    mkRow(s1, "Mode",           st.mode ?? "disabled", SpotifyEnhanced.MODES[st.mode ?? "disabled"]?.color);
-                    mkRow(s1, "Currently playing", this._isPlaying ? "▶ Yes" : "⏹ No", this._isPlaying ? "#57f287" : "#ed4245");
-                    mkRow(s1, "Track ID",       this._currentTrackId ? this._currentTrackId.slice(0,20)+"…" : "—", "#99aab5");
-                    mkRow(s1, "Lyrics loaded",  this._currentLyrics ? `${this._currentLyrics.length} lines` : "—", "#57f287");
-                    mkRow(s1, "Saved status",   `"${this._savedStatus?.text ?? ""}"`, "#eb459e");
+                    mkRow(s1, "Mode",          st.mode ?? "disabled", SpotifyEnhanced.MODES[st.mode ?? "disabled"]?.color);
+                    mkRow(s1, "Playing",       this._isPlaying ? "▶ Yes" : "⏹ No", this._isPlaying ? "#57f287" : "#ed4245");
+                    mkRow(s1, "Current track", this._currentTrackId ? this._currentTrackId.slice(0,20)+"…" : "—", "#99aab5");
+                    mkRow(s1, "Lyrics loaded", this._currentLyrics ? `${this._currentLyrics.length} lines` : "—", "#57f287");
 
-                    const s2 = mkSec("SpotifyLyrics — Cache");
-                    mkRow(s2, "Lyrics cache",   `${this._lyricsCache.size} / ${SpotifyEnhanced.CACHE_MAX}`, "#faa61a");
-                    mkRow(s2, "In-flight fetch", `${this._prefetching.size}`, "#00b0f4");
-                    mkRow(s2, "Track offsets",  `${Object.keys(this._trackOffsets).length}`, "#99aab5");
-                    mkRow(s2, "History",        `${this._history.length} / ${this._settings?.historyMax ?? 20}`, "#99aab5");
-                    mkRow(s2, "Blacklisted",    `${this._blacklist.size}`, "#ed4245");
-                    s2.appendChild(mkBtn("🗑 Clear lyrics cache", "#faa61a", () => {
-                        this._lyricsCache.clear();
-                        this._log("cache", "Lyrics cache cleared");
-                        renderCacheSL();
-                    }));
+                    // Saved status with clear button
+                    const ssRow = document.createElement("div");
+                    ssRow.style.cssText = "display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid rgba(255,255,255,.04);font-size:12px;gap:8px";
+                    const ssLbl = document.createElement("span"); ssLbl.textContent = "Saved status"; ssLbl.style.color = "#72767d";
+                    const ssRight = document.createElement("div"); ssRight.style.cssText = "display:flex;align-items:center;gap:6px";
+                    const ssVal = document.createElement("span"); ssVal.style.cssText = "font-family:monospace;color:#eb459e;font-size:11px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
+                    ssVal.textContent = this._savedStatus?.text ? `"${this._savedStatus.text}"` : "(empty)";
+                    const ssClear = document.createElement("button"); ssClear.textContent = "🗑 Clear";
+                    ssClear.style.cssText = "padding:2px 8px;border-radius:4px;border:1px solid #ed424444;background:#ed424411;color:#ed4245;cursor:pointer;font-size:11px;font-weight:600";
+                    ssClear.onclick = () => { this._savedStatus = null; this._statusSaved = false; this._log("cache", "Saved status cleared"); ssVal.textContent = "(empty)"; };
+                    ssRight.append(ssVal, ssClear); ssRow.append(ssLbl, ssRight); s1.appendChild(ssRow);
+
+                    const s2 = mkSec("SpotifyLyrics — Caches & Limits");
+                    const mkClearRow = (parent, label, valFn, color, onClear, limitKey) => {
+                        const r = document.createElement("div");
+                        r.style.cssText = "display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid rgba(255,255,255,.04);font-size:12px;gap:8px";
+                        const lbl = document.createElement("span"); lbl.style.color = "#72767d"; lbl.textContent = label; lbl.style.flex = "1";
+                        const right = document.createElement("div"); right.style.cssText = "display:flex;align-items:center;gap:6px;flex-shrink:0";
+                        const v = document.createElement("span"); v.style.cssText = `font-family:monospace;color:${color};font-size:11px`; v.textContent = valFn();
+                        const clrB = document.createElement("button"); clrB.textContent = "🗑";
+                        clrB.style.cssText = "padding:2px 6px;border-radius:4px;border:1px solid #ed424444;background:#ed424411;color:#ed4245;cursor:pointer;font-size:11px";
+                        clrB.onclick = () => { onClear(); v.textContent = valFn(); if(limitKey){li.value=this._settings?.[limitKey]??20;} };
+                        right.append(v, clrB);
+                        // Optional limit editor
+                        if (limitKey && this._settings) {
+                            const li = document.createElement("input"); li.type="number"; li.value=this._settings[limitKey]??20; li.min=1; li.max=500;
+                            li.style.cssText = "background:#111214;color:#dbdee1;border:1px solid #3f4147;border-radius:4px;padding:2px 5px;width:54px;font-size:11px;font-family:monospace";
+                            const setB = document.createElement("button"); setB.textContent="Set";
+                            setB.style.cssText = "padding:2px 6px;border-radius:4px;border:1px solid #5865f244;background:#5865f211;color:#5865f2;cursor:pointer;font-size:11px;font-weight:600";
+                            setB.onclick = () => { const n=parseInt(li.value,10); if(!isNaN(n)&&n>=1){this._settings[limitKey]=n;this._saveSettings(this._settings);v.textContent=valFn();} };
+                            right.append(li, setB);
+                        }
+                        r.append(lbl, right); parent.appendChild(r);
+                    };
+                    mkClearRow(s2, "Lyrics cache",
+                        () => `${this._lyricsCache.size} / ${SpotifyEnhanced.CACHE_MAX}`, "#faa61a",
+                        () => { this._lyricsCache.clear(); this._log("cache", "Lyrics cache cleared"); },
+                        null);
+                    mkClearRow(s2, "In-flight fetches",
+                        () => `${this._prefetching.size}`, "#00b0f4",
+                        () => { this._prefetching.clear(); },
+                        null);
+                    mkClearRow(s2, "Track offsets",
+                        () => `${Object.keys(this._trackOffsets).length}`, "#99aab5",
+                        () => { this._trackOffsets={}; BdApi.Data.save(SpotifyEnhanced.PLUGIN_NAME,"trackOffsets",{}); },
+                        null);
+                    mkClearRow(s2, "History",
+                        () => `${this._history.length} / ${this._settings?.historyMax ?? 20}`, "#99aab5",
+                        () => { this._history=[]; BdApi.Data.save(SpotifyEnhanced.PLUGIN_NAME,"history",[]); },
+                        "historyMax");
+                    mkClearRow(s2, "Blacklisted tracks",
+                        () => `${this._blacklist.size}`, "#ed4245",
+                        () => { this._blacklist.clear(); BdApi.Data.save(SpotifyEnhanced.PLUGIN_NAME,"blacklist",[]); },
+                        null);
                 };
 
                 const renderCacheSTD = () => {
@@ -1719,20 +1737,24 @@ Thank you.
             // ─── Options ──────────────────────────────────────────────────────
             const renderMainOptions = () => {
                 mainContent.innerHTML = "";
+                const RAW_URL = "https://raw.githubusercontent.com/NoKs-GIT/BetterDiscord/main/plugins/spotifyenhanced/SpotifyEnhanced.plugin.js";
+
+                // Header
                 const hdr = document.createElement("div");
                 hdr.innerHTML = `
-                    <div style="font-size:15px;font-weight:800;color:#fff;margin-bottom:6px">⚙️ SpotifyEnhanced Options</div>
-                    <div style="font-size:12px;color:#72767d;margin-bottom:20px">Global settings for the SpotifyEnhanced host plugin. Per-plugin settings are in each plugin's own tab.</div>
+                    <div style="font-size:15px;font-weight:800;color:#fff;margin-bottom:4px">⚙️ Options</div>
+                    <div style="font-size:12px;color:#72767d;margin-bottom:18px">Global settings for SpotifyEnhanced. Per-plugin settings are in each plugin page.</div>
                 `;
                 mainContent.appendChild(hdr);
 
+                // About card
                 const aboutCard = document.createElement("div");
                 aboutCard.style.cssText = "background:#111214;border-radius:10px;padding:14px 16px;margin-bottom:16px;display:grid;grid-template-columns:auto 1fr;gap:5px 16px;font-size:12px;font-family:monospace;border:1px solid #2e3035";
                 [
-                    ["Plugin",       SpotifyEnhanced.PLUGIN_NAME,    "#5865f2"],
-                    ["Version",      `v${SpotifyEnhanced.PLUGIN_VERSION}`, "#dbdee1"],
-                    ["Description",  SpotifyEnhanced.PLUGIN_DESC,    "#72767d"],
-                    ["Sub-plugins",  `${Object.keys(SpotifyEnhanced.SUB_PLUGINS).length} registered`, "#57f287"],
+                    ["Plugin",      SpotifyEnhanced.PLUGIN_NAME,                                       "#5865f2"],
+                    ["Version",     `v${SpotifyEnhanced.PLUGIN_VERSION}`,                              "#dbdee1"],
+                    ["Description", SpotifyEnhanced.PLUGIN_DESC,                                       "#72767d"],
+                    ["Sub-plugins", `${Object.keys(SpotifyEnhanced.SUB_PLUGINS).length} registered`,   "#57f287"],
                 ].forEach(([k, v, col]) => {
                     const kEl = document.createElement("span"); kEl.textContent = k; kEl.style.color = "#72767d";
                     const vEl = document.createElement("span"); vEl.textContent = v; vEl.style.color = col;
@@ -1740,17 +1762,73 @@ Thank you.
                 });
                 mainContent.appendChild(aboutCard);
 
+                // ── Auto-Update (functional) ──────────────────────────────────
+                const updCard = document.createElement("div");
+                updCard.style.cssText = "background:#111214;border-radius:8px;padding:14px 16px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;border:1px solid #2e3035;gap:14px";
+                const updLeft = document.createElement("div");
+                updLeft.style.flex = "1";
+                updLeft.innerHTML = `
+                    <div style="font-weight:700;font-size:13px;color:#dbdee1;margin-bottom:4px">🔄 Auto-Update</div>
+                    <div style="font-size:12px;color:#72767d">Check for a newer version of SpotifyEnhanced on GitHub. If available, download the updated file and replace it in your BD plugins folder.</div>
+                `;
+                const updBtn = document.createElement("button");
+                updBtn.textContent   = "🔄 Check now";
+                updBtn.style.cssText = "padding:8px 16px;border-radius:6px;border:none;background:#5865f2;color:#fff;cursor:pointer;font-size:12px;font-weight:700;flex-shrink:0;white-space:nowrap;transition:background .15s";
+                updBtn.onclick = async () => {
+                    updBtn.textContent = "Checking…"; updBtn.style.opacity = "0.6"; updBtn.style.pointerEvents = "none";
+                    try {
+                        const res = await fetch(RAW_URL, { signal: AbortSignal.timeout(12000) });
+                        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                        const text   = await res.text();
+                        const match  = text.match(/@version\s+([\d.]+)/);
+                        const remote = match?.[1] ?? "?";
+                        const local  = SpotifyEnhanced.PLUGIN_VERSION;
+                        this._log("info", `Auto-Update: remote=v${remote} local=v${local}`, "HOST");
+
+                        if (remote === local) {
+                            updBtn.textContent     = `✓ Up to date (v${local})`;
+                            updBtn.style.background = "#57f287"; updBtn.style.color = "#000";
+                            updBtn.style.opacity   = "1"; updBtn.style.pointerEvents = "none";
+                        } else {
+                            updBtn.textContent     = `⬇ v${remote} available — click to download`;
+                            updBtn.style.background = "#fee75c"; updBtn.style.color = "#000";
+                            updBtn.style.opacity   = "1"; updBtn.style.pointerEvents = "auto";
+                            updBtn.onclick = () => {
+                                const blob = new Blob([text], { type: "text/javascript" });
+                                const a = document.createElement("a");
+                                a.href = URL.createObjectURL(blob);
+                                a.download = "SpotifyEnhanced.plugin.js"; a.click();
+                                this._log("plugin", `Auto-Update: downloaded v${remote}`, "HOST");
+                                updBtn.textContent     = `✓ Downloaded v${remote} — replace the file in your BD plugins folder`;
+                                updBtn.style.background = "#57f287"; updBtn.style.color = "#000";
+                                updBtn.style.pointerEvents = "none";
+                            };
+                        }
+                    } catch (e) {
+                        updBtn.textContent     = `✗ Check failed: ${e.message}`;
+                        updBtn.style.background = "#ed4245"; updBtn.style.color = "#fff";
+                        updBtn.style.opacity   = "1";
+                        this._log("warn", `Auto-Update failed: ${e.message}`, "HOST");
+                        setTimeout(() => {
+                            updBtn.textContent = "🔄 Retry"; updBtn.style.background = "#5865f2";
+                            updBtn.style.color = "#fff"; updBtn.style.pointerEvents = "auto";
+                        }, 4000);
+                    }
+                };
+                updCard.append(updLeft, updBtn);
+                mainContent.appendChild(updCard);
+
+                // ── Coming soon ────────────────────────────────────────────────
                 [
-                    { icon: "🌐", title: "Language",           desc: "Change the display language. Currently only English (US) available." },
+                    { icon: "🌐", title: "Language",           desc: "Change display language. Currently English (US) only." },
                     { icon: "🎨", title: "Theme",              desc: "Customise the colour scheme of the settings panel." },
                     { icon: "⌨️", title: "Keyboard Shortcuts", desc: "Bind keys to quickly switch plugin modes." },
-                    { icon: "🔔", title: "Notifications",      desc: "Get a toast when a plugin encounters an error." },
-                    { icon: "🔄", title: "Auto-Update", desc: "Fetch the latest SpotifyEnhanced from GitHub and prompt to install.", action: "autoupdate" },
+                    { icon: "🔔", title: "Notifications",      desc: "Get a Discord toast when a plugin encounters an error." },
                 ].forEach(sec => {
                     const card = document.createElement("div");
-                    card.style.cssText = "background:#111214;border-radius:8px;padding:12px 14px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;border:1px solid #2e3035;opacity:.65";
+                    card.style.cssText = "background:#111214;border-radius:8px;padding:12px 14px;margin-bottom:8px;display:flex;align-items:center;gap:12px;border:1px solid #2e3035;opacity:.5";
                     card.innerHTML = `
-                        <div>
+                        <div style="flex:1">
                             <div style="font-weight:700;font-size:13px;color:#dbdee1;display:flex;align-items:center;gap:8px">
                                 ${sec.icon} ${sec.title}
                                 <span style="font-size:10px;padding:1px 7px;border-radius:3px;font-weight:700;background:#5865f222;color:#5865f2;border:1px solid #5865f244">COMING SOON</span>
@@ -2411,6 +2489,9 @@ Thank you.
         // ── Render initial tab
         renderTab("Main");
 
+        // Add back-to-main footer
+        addGoMainBtn(pluginContainer);
+
         }; // end renderPluginLyrics
 
                 // ── SpotifyTitleDisplay settings page ─────────────────────────────────
@@ -2592,7 +2673,7 @@ Thank you.
                     this._stdEnabled = enTog.checked;
                     if (this._stdEnabled) this._startSTD();
                     else                  this._stopSTD();
-                    this._log("plugin", `SpotifyTitleDisplay ${this._stdEnabled ? "enabled" : "disabled"}`);
+                    this._log("plugin", `→ ${this._stdEnabled ? "ACTIVE" : "DISABLED"}`, "STD");
                 };
                 stdRow(secInfo, "Enable SpotifyTitleDisplay", "Toggle the plugin on/off without reloading.", enTog);
 
@@ -2649,6 +2730,9 @@ Thank you.
 
             // Also update _startSTD to use stdSettings
             renderSTDTab("Main");
+
+            // Add back-to-main footer
+            addGoMainBtn(wrap);
         };
 
         // Initial render — default to Main
